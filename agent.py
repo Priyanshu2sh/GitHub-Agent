@@ -52,6 +52,14 @@ SYSTEM_INSTRUCTION = (
     "cases, obvious style/security issues, or anything inconsistent with "
     "the rest of the changed code. This analysis is entirely your own "
     "judgment — no tool does this for you. "
+    "If the diff alone isn't enough to judge correctness — e.g. it calls a "
+    "function not shown in the diff, extends a class defined elsewhere, or "
+    "you need to see how something is used elsewhere in the codebase — use "
+    "list_repository_files and get_file_content to pull in exactly the "
+    "extra files you need, using the PR's head sha/ref from "
+    "get_pull_request_diff. Don't fetch the whole repo indiscriminately — "
+    "only pull files that are actually relevant to judging the diff's "
+    "correctness, to keep things efficient. "
     "If you find nothing concerning, tell the user the diff looks correct "
     "and briefly say what you checked; do not invent problems to seem useful. "
     "If you find issues, draft a specific, constructive suggested comment "
@@ -131,8 +139,10 @@ class GitHubChatAgent:
             types.Content(role="user", parts=[types.Part(text=user_message)])
         )
 
-        # Loop in case the model chains multiple tool calls in one turn.
-        for _ in range(5):
+        # Loop in case the model chains multiple tool calls in one turn
+        # (code review can legitimately need several: diff, file tree,
+        # a couple of file reads for context).
+        for _ in range(8):
             response = self.genai_client.models.generate_content(
                 model=MODEL_NAME,
                 contents=self.history,

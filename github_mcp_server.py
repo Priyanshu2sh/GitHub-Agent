@@ -161,6 +161,11 @@ def get_pull_request_diff(repo_full_name: str, pr_number: int) -> str:
     sections = [
         f"PR #{pr_number}: \"{pr.title}\" by {pr.user.login}\n"
         f"{len(files)} file(s) changed, +{pr.additions}/-{pr.deletions}\n"
+        f"head ref: {pr.head.ref} (sha: {pr.head.sha})\n"
+        f"base ref: {pr.base.ref}\n"
+        f"(use this head sha/ref with list_repository_files or get_file_content "
+        f"to pull extra context — e.g. a function's full definition or a file "
+        f"the diff calls into but doesn't show)\n"
     ]
 
     for f in truncated_file_list:
@@ -177,6 +182,79 @@ def get_pull_request_diff(repo_full_name: str, pr_number: int) -> str:
         )
 
     return "\n\n".join(sections)
+
+
+@mcp.tool()
+def list_repository_files(repo_full_name: str, ref: str = "") -> str:
+    """List all file paths in a repository at a given ref (branch, tag, or
+    commit SHA). Use this while reviewing a PR to see what other files exist
+    in the codebase, so you can decide which ones to fetch with
+    get_file_content for extra context (e.g. finding the file that defines a
+    function the PR's diff calls but doesn't show).
+
+    Args:
+        repo_full_name: Repository in "owner/repo" format.
+        ref: Branch/tag/commit SHA to list files at. Leave empty to use the
+            repo's default branch. When reviewing a specific PR, prefer the
+            PR's head sha/ref (returned by get_pull_request_diff) so you see
+            the codebase as it looks in that PR, not just the base branch.
+    """
+    MAX_FILES = 300
+    try:
+        repo = gh.get_repo(repo_full_name)
+        ref = ref or repo.default_branch
+        tree = repo.get_git_tree(ref, recursive=True)
+    except GithubException as e:
+        return f"Error listing files in '{repo_full_name}' at ref '{ref}': {e.data.get('message', str(e))}"
+
+    files = [item.path for item in tree.tree if item.type == "blob"]
+    if not files:
+        return f"No files found in {repo_full_name}@{ref}."
+
+    shown = files[:MAX_FILES]
+    result = f"{len(files)} file(s) in {repo_full_name}@{ref}:\n" + "\n".join(shown)
+    if len(files) > MAX_FILES:
+        result += f"\n... [{len(files) - MAX_FILES} more not shown — narrow down by directory if needed]"
+    return result
+
+
+@mcp.tool()
+def get_file_content(repo_full_name: str, path: str, ref: str = "") -> str:
+    """Fetch the text content of one specific file, for extra context when
+    reviewing a PR — e.g. seeing the full definition of a function the diff
+    modifies, or a file the diff imports/calls but doesn't show.
+
+    Args:
+        repo_full_name: Repository in "owner/repo" format.
+        path: File path within the repo, e.g. "src/utils/helpers.py". Get
+            valid paths from list_repository_files first if unsure.
+        ref: Branch/tag/commit SHA to read the file at. Leave empty to use
+            the repo's default branch. When reviewing a specific PR, prefer
+            the PR's head sha/ref (from get_pull_request_diff) so the file
+            content matches what's actually in that PR.
+    """
+    MAX_CHARS = 8000
+    try:
+        repo = gh.get_repo(repo_full_name)
+        ref = ref or repo.default_branch
+        content_file = repo.get_contents(path, ref=ref)
+    except GithubException as e:
+        return f"Error reading '{path}' in '{repo_full_name}' at ref '{ref}': {e.data.get('message', str(e))}"
+
+    if isinstance(content_file, list):
+        return f"'{path}' is a directory, not a file. Use list_repository_files to browse it."
+
+    try:
+        text = content_file.decoded_content.decode("utf-8", errors="replace")
+    except Exception as e:
+        return f"Could not decode '{path}' as text (likely a binary file): {e}"
+
+    note = ""
+    if len(text) > MAX_CHARS:
+        text = text[:MAX_CHARS]
+        note = "\n... [file truncated for length] ..."
+
+    return f"--- {path} (ref: {ref}) ---\n{text}{note}"
 
 
 @mcp.tool()
