@@ -128,6 +128,58 @@ def list_pull_requests(repo_full_name: str, state: str = "open") -> str:
 
 
 @mcp.tool()
+def get_pull_request_diff(repo_full_name: str, pr_number: int) -> str:
+    """Fetch the actual code changes (diff) for a specific pull request, so
+    they can be reviewed for correctness. Returns each changed file's name,
+    change type, and unified diff patch. Use this before judging whether a
+    PR's code looks correct or suggesting a review comment — never guess at
+    code changes without fetching this first.
+
+    Large diffs are truncated per-file and capped in total file count to
+    stay a reasonable size; if a diff looks cut off, mention that in your
+    analysis rather than assuming you saw everything.
+
+    Args:
+        repo_full_name: Repository in "owner/repo" format, e.g. "octocat/hello-world".
+            The owner must be the authenticated user themselves.
+        pr_number: The pull request number to fetch the diff for.
+    """
+    MAX_FILES = 25
+    MAX_PATCH_CHARS = 3000
+
+    try:
+        repo = gh.get_repo(repo_full_name)
+        pr = repo.get_pull(pr_number)
+        files = list(pr.get_files())
+    except GithubException as e:
+        return f"Error fetching PR #{pr_number} in '{repo_full_name}': {e.data.get('message', str(e))}"
+
+    if not files:
+        return f"PR #{pr_number} in {repo_full_name} has no file changes."
+
+    truncated_file_list = files[:MAX_FILES]
+    sections = [
+        f"PR #{pr_number}: \"{pr.title}\" by {pr.user.login}\n"
+        f"{len(files)} file(s) changed, +{pr.additions}/-{pr.deletions}\n"
+    ]
+
+    for f in truncated_file_list:
+        patch = f.patch or "(no textual diff available — likely a binary file)"
+        if len(patch) > MAX_PATCH_CHARS:
+            patch = patch[:MAX_PATCH_CHARS] + "\n... [patch truncated for length] ..."
+        sections.append(
+            f"--- {f.filename} ({f.status}, +{f.additions}/-{f.deletions}) ---\n{patch}"
+        )
+
+    if len(files) > MAX_FILES:
+        sections.append(
+            f"\n[Only showing {MAX_FILES} of {len(files)} changed files — diff truncated.]"
+        )
+
+    return "\n\n".join(sections)
+
+
+@mcp.tool()
 def add_pr_comment(repo_full_name: str, pr_number: int, comment: str) -> str:
     """Add a comment to a specific pull request.
 
