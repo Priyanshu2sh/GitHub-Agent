@@ -354,7 +354,7 @@ def add_pr_review(repo_full_name: str, pr_number: int, summary: str, comments: l
 
     review_comments = []
     for c in comments:
-        review_comments.append(
+        review_comments.append(assax
             {"path": c["path"], "line": int(c["line"]), "body": c["body"], "side": "RIGHT"}
         )
 
