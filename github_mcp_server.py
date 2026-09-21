@@ -7,7 +7,7 @@ Custom MCP server exposing GitHub tools:
   - get_pull_request_diff   - fetch a PR's diff, with new-file line numbers
   - list_repository_files   - browse the file tree at a given ref
   - get_file_content        - read one file's content at a given ref
-  - add_pr_review           - post a review: summary + inline file/line comments
+  - add_pr_review           - post a review: summary + severity-classified inline comments
   - add_pr_comment          - post a single general (non-inline) comment
 
 Uses the standalone `fastmcp` package (NOT the old `mcp.server.fastmcp`
@@ -325,6 +325,14 @@ def add_pr_review(repo_full_name: str, pr_number: int, summary: str, comments: l
     (instead of add_pr_comment) whenever you have specific per-file,
     per-line feedback from reviewing a diff via get_pull_request_diff.
 
+    Every comment must be classified by severity so the team can tell what
+    blocks merging from what's just a suggestion:
+      - "Blocker"  : breaks functionality, will fail/crash, or is clearly wrong — must fix before merge
+      - "Critical" : serious bug, security issue, or data-correctness risk — must fix before merge
+      - "High"     : significant problem (bad edge-case handling, likely bug) — should fix before merge
+      - "Warning"  : real but non-blocking concern (style, minor inefficiency, unclear naming) — recommendation only
+      - "Info"     : optional note, nitpick, or praise — recommendation only, no action required
+
     IMPORTANT: each comment's "line" must be a new-file line number you
     actually saw prefixed in get_pull_request_diff's output — GitHub
     rejects comments on lines that aren't part of the diff. Never invent a
@@ -339,12 +347,25 @@ def add_pr_review(repo_full_name: str, pr_number: int, summary: str, comments: l
         pr_number: The pull request number to review.
         summary: Overall review description — what was reviewed and the
             general verdict, shown at the top of the review like a normal
-            PR review comment.
+            PR review comment. A severity breakdown and merge-readiness
+            line are appended automatically — don't duplicate that here.
         comments: List of per-location comments. Each item is an object
             with keys: "path" (file path exactly as shown in the diff),
             "line" (the new-file line number from get_pull_request_diff),
-            and "body" (the comment text for that specific line).
+            "body" (the comment text for that specific line), and
+            "severity" (one of "Blocker", "Critical", "High", "Warning",
+            "Info" — required for every comment).
     """
+    SEVERITY_ORDER = ["Blocker", "Critical", "High", "Warning", "Info"]
+    BLOCKING_SEVERITIES = {"Blocker", "Critical", "High"}
+    SEVERITY_EMOJI = {
+        "Blocker": "🚫",
+        "Critical": "🔴",
+        "High": "🟠",
+        "Warning": "🟡",
+        "Info": "🔵",
+    }
+
     try:
         repo = gh.get_repo(repo_full_name)
         pr = repo.get_pull(pr_number)
@@ -353,13 +374,43 @@ def add_pr_review(repo_full_name: str, pr_number: int, summary: str, comments: l
         return f"Error preparing review for PR #{pr_number} in '{repo_full_name}': {e.data.get('message', str(e))}"
 
     review_comments = []
+    severity_counts = {s: 0 for s in SEVERITY_ORDER}
     for c in comments:
+        severity = c.get("severity", "")
+        if severity not in SEVERITY_ORDER:
+            return (
+                f"Invalid severity '{severity}' on a comment for {c.get('path')}. "
+                f"Must be one of: {', '.join(SEVERITY_ORDER)}."
+            )
+        severity_counts[severity] += 1
+        tag = f"{SEVERITY_EMOJI[severity]} **[{severity.upper()}]**"
+        must_fix_note = " *(must fix before merge)*" if severity in BLOCKING_SEVERITIES else " *(recommendation only)*"
         review_comments.append(
-            {"path": c["path"], "line": int(c["line"]), "body": c["body"], "side": "RIGHT"}
+            {
+                "path": c["path"],
+                "line": int(c["line"]),
+                "body": f"{tag}{must_fix_note}\n\n{c['body']}",
+                "side": "RIGHT",
+            }
         )
 
+    blocking_total = sum(severity_counts[s] for s in BLOCKING_SEVERITIES)
+    breakdown_lines = [f"- {s}: {severity_counts[s]}" for s in SEVERITY_ORDER if severity_counts[s] > 0]
+    if breakdown_lines:
+        merge_line = (
+            f"**{blocking_total} issue(s) must be fixed before merge** "
+            f"(Blocker/Critical/High)." if blocking_total > 0
+            else "No blocking issues — remaining items are recommendations only."
+        )
+        full_summary = (
+            f"{summary}\n\n---\n**Findings by severity:**\n"
+            + "\n".join(breakdown_lines) + f"\n\n{merge_line}"
+        )
+    else:
+        full_summary = summary
+
     try:
-        pr.create_review(commit=commit, body=summary, event="COMMENT", comments=review_comments)
+        pr.create_review(commit=commit, body=full_summary, event="COMMENT", comments=review_comments)
     except GithubException as e:
         return (
             f"Error posting review on PR #{pr_number} in '{repo_full_name}': "
@@ -370,7 +421,7 @@ def add_pr_review(repo_full_name: str, pr_number: int, summary: str, comments: l
 
     return (
         f"Review posted on PR #{pr_number} in {repo_full_name} with "
-        f"{len(review_comments)} inline comment(s): {pr.html_url}"
+        f"{len(review_comments)} inline comment(s) ({blocking_total} blocking): {pr.html_url}"
     )
 
 
